@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import codecs
 import json
 import os
 import shutil
@@ -17,6 +18,7 @@ from pathlib import Path
 
 
 DEFAULT_AUTHOR = "Prajas Wadekar"
+FALLBACK_INPUT_FORMAT = "markdown-yaml_metadata_block-simple_tables-multiline_tables-grid_tables"
 
 
 class MpdfError(Exception):
@@ -28,6 +30,12 @@ class Metadata:
     title: str
     author: str
     date: str
+
+
+@dataclass
+class InputConfig:
+    yaml_meta: dict[str, str]
+    input_format: str | None = None
 
 
 def parse_args() -> argparse.Namespace:
@@ -89,7 +97,7 @@ def require_input_file(input_path: Path) -> None:
         raise MpdfError(f"Input path is not a file: {input_path}")
 
 
-def extract_pandoc_metadata(input_path: Path) -> dict[str, str]:
+def detect_input_config(input_path: Path) -> InputConfig:
     command = ["pandoc", str(input_path), "-t", "json"]
     result = subprocess.run(
         command,
@@ -98,13 +106,50 @@ def extract_pandoc_metadata(input_path: Path) -> dict[str, str]:
         text=True,
     )
     if result.returncode != 0:
+        if is_yaml_metadata_error(result.stderr):
+            if starts_with_yaml_front_matter(input_path):
+                raise MpdfError(
+                    "Your Markdown file starts with a YAML front matter block, but it is not valid YAML. "
+                    "Fix or remove the front matter and try again.\n\n"
+                    f"{format_command_error(command, result.stderr, result.stdout)}"
+                )
+
+            fallback_command = [
+                "pandoc",
+                "--from",
+                FALLBACK_INPUT_FORMAT,
+                str(input_path),
+                "-t",
+                "json",
+            ]
+            fallback_result = subprocess.run(
+                fallback_command,
+                cwd=input_path.parent,
+                capture_output=True,
+                text=True,
+            )
+            if fallback_result.returncode != 0:
+                raise MpdfError(
+                    "Pandoc could not read the Markdown file, even after retrying with YAML metadata parsing disabled.\n"
+                    f"{format_command_error(fallback_command, fallback_result.stderr, fallback_result.stdout)}"
+                )
+
+            return InputConfig(
+                yaml_meta=extract_metadata_from_json(fallback_result.stdout),
+                input_format=FALLBACK_INPUT_FORMAT,
+            )
+
         raise MpdfError(
             "Pandoc could not read the Markdown metadata.\n"
             f"{format_command_error(command, result.stderr, result.stdout)}"
         )
 
+    return InputConfig(yaml_meta=extract_metadata_from_json(result.stdout))
+
+
+def extract_metadata_from_json(document_json: str) -> dict[str, str]:
     try:
-        document = json.loads(result.stdout)
+        document = json.loads(document_json)
     except json.JSONDecodeError as exc:
         raise MpdfError(f"Pandoc returned invalid JSON while probing metadata: {exc}") from exc
 
@@ -117,6 +162,27 @@ def extract_pandoc_metadata(input_path: Path) -> dict[str, str]:
                 extracted[field] = text
 
     return extracted
+
+
+def is_yaml_metadata_error(stderr: str) -> bool:
+    if not stderr:
+        return False
+    lowered = stderr.lower()
+    return "error parsing yaml metadata" in lowered or "yaml parse exception" in lowered
+
+
+def starts_with_yaml_front_matter(input_path: Path) -> bool:
+    try:
+        with input_path.open("rb") as handle:
+            sample = handle.read(4096)
+    except OSError:
+        return False
+
+    if sample.startswith(codecs.BOM_UTF8):
+        sample = sample[len(codecs.BOM_UTF8) :]
+
+    first_line = sample.splitlines()[0] if sample.splitlines() else b""
+    return first_line.strip() == b"---"
 
 
 def meta_value_to_text(node: object) -> str:
@@ -226,13 +292,13 @@ def resolve_metadata(args: argparse.Namespace, yaml_meta: dict[str, str], input_
 def build_pandoc_command(
     args: argparse.Namespace,
     metadata: Metadata,
+    input_format: str | None,
     input_path: Path,
     output_path: Path,
     stack: ExitStack,
 ) -> list[str]:
     command = [
         "pandoc",
-        str(input_path),
         "--standalone",
         "--pdf-engine=xelatex",
         "--syntax-highlighting=pygments",
@@ -242,6 +308,12 @@ def build_pandoc_command(
         "fontsize=11pt",
         "--variable",
         "linestretch=1.08",
+        "--variable",
+        "mainfont=Cambria",
+        "--variable",
+        "sansfont=Calibri",
+        "--variable",
+        "monofont=Consolas",
         "--variable",
         "colorlinks=true",
         "--variable",
@@ -257,6 +329,11 @@ def build_pandoc_command(
         "--output",
         str(output_path),
     ]
+
+    if input_format:
+        command.extend(["--from", input_format])
+
+    command.append(str(input_path))
 
     if not args.no_toc:
         command.extend(["--toc", "--toc-depth=3"])
@@ -353,12 +430,19 @@ def main() -> int:
         require_input_file(args.input)
         check_dependencies()
 
-        yaml_meta = extract_pandoc_metadata(args.input)
-        metadata = resolve_metadata(args, yaml_meta, args.input)
+        input_config = detect_input_config(args.input)
+        metadata = resolve_metadata(args, input_config.yaml_meta, args.input)
         output_path = args.input.with_suffix(".pdf")
 
         with ExitStack() as stack:
-            command = build_pandoc_command(args, metadata, args.input, output_path, stack)
+            command = build_pandoc_command(
+                args,
+                metadata,
+                input_config.input_format,
+                args.input,
+                output_path,
+                stack,
+            )
             run_conversion(command, args.input.parent)
 
         print(f"Created PDF: {output_path}")
