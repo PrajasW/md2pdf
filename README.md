@@ -7,10 +7,11 @@
 LLMs are great at generating reports, summaries, notes, and technical documents in Markdown, but raw `.md` files usually do not look presentation-ready. `mpdf` solves that by turning Markdown into a clean, professional PDF with:
 
 - a title, author, and date
-- a table of contents
+- an optional table of contents
 - syntax-highlighted code blocks
 - properly rendered math
 - support for images
+- single source line breaks preserved as line breaks in the PDF
 - cleaner typography than plain Markdown viewers
 
 This is especially useful when:
@@ -83,7 +84,7 @@ mpdf report.md
 ### Basic Command
 
 ```powershell
-mpdf <input.md> [title] [author] [date]
+mpdf <input.md> [--title "..."] [--author "..."] [--date YYYY-MM-DD] [--index]
 ```
 
 ### Examples
@@ -97,13 +98,13 @@ mpdf report.md
 Override title, author, and date:
 
 ```powershell
-mpdf report.md "AI slop" "Prajas Wadekar" 2026-04-29
+mpdf report.md --title "AI slop" --author "Prajas Wadekar" --date 2026-04-29
 ```
 
-Disable the table of contents:
+Include a table of contents:
 
 ```powershell
-mpdf report.md --no-toc
+mpdf report.md --index
 ```
 
 Use a custom Pandoc LaTeX template:
@@ -124,7 +125,8 @@ If you do not supply metadata manually:
 
 - `title` defaults to the input filename without the extension
 - `author` defaults to `Prajas Wadekar`
-- `date` defaults to today’s date in `YYYY-MM-DD` format
+- `date` defaults to today's date in `YYYY-MM-DD` format
+- the table of contents is disabled unless you pass `--index`
 
 If your Markdown file already contains YAML front matter, `mpdf` respects it. CLI arguments override YAML values when both are present.
 
@@ -151,3 +153,13 @@ mpdf analysis.md
 4. Share the generated `analysis.pdf`.
 
 That gives you a much more polished result than sending the raw Markdown file.
+
+## Obsidian Plugin
+
+An Obsidian plugin is included in the `obsidian-plugin` folder to easily export your active note to a PDF in your `Downloads\Obsidian_pdf` folder using `mpdf`.
+
+To install and use it:
+
+1. Copy the `obsidian-plugin` folder to your vault's plugins directory (e.g., `.obsidian/plugins/mpdf-export`).
+2. Restart Obsidian and enable "MPDF Export" in **Settings > Community Plugins**.
+3. Open a Markdown note and click the new download icon in the left ribbon, or open the command palette (`Ctrl+P`) and run **"Export active note to Downloads as PDF"**.

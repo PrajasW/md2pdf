@@ -1,0 +1,9 @@
+{
+  "id": "mpdf-export",
+  "name": "MPDF Export",
+  "version": "1.0.0",
+  "minAppVersion": "0.15.0",
+  "description": "Export the active note to a PDF in Downloads using mpdf.",
+  "author": "Prajas Wadekar",
+  "isDesktopOnly": true
+}
