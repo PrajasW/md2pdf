@@ -9,8 +9,10 @@ LLMs are great at generating reports, summaries, notes, and technical documents 
 - a title, author, and date
 - an optional table of contents
 - syntax-highlighted code blocks
+- Mermaid flowcharts and diagrams rendered as images
 - properly rendered math
 - support for images
+- a terminal progress bar during conversion
 - single source line breaks preserved as line breaks in the PDF
 - cleaner typography than plain Markdown viewers
 
@@ -31,6 +33,8 @@ Before using `mpdf`, install these tools:
 - Python 3
 - Pandoc
 - TeX Live with `xelatex`
+- Node.js if you want Mermaid diagrams rendered via `npx`
+- or Mermaid CLI globally via `npm install -g @mermaid-js/mermaid-cli`
 
 Helpful install options on Windows:
 
@@ -38,6 +42,7 @@ Helpful install options on Windows:
 - Pandoc via Winget: `winget install --id Pandoc.Pandoc`
 - TeX Live: https://www.tug.org/texlive/
 - Python: https://www.python.org/downloads/
+- Node.js: https://nodejs.org/
 
 ### Clone the Repository
 
@@ -119,6 +124,16 @@ Put the title on its own page:
 mpdf report.md --title-page
 ```
 
+Render Mermaid diagrams:
+
+````markdown
+```mermaid
+flowchart TD
+    A[Write Markdown] --> B[mpdf]
+    B --> C[Rendered PDF]
+```
+````
+
 ### Defaults
 
 If you do not supply metadata manually:
@@ -127,6 +142,8 @@ If you do not supply metadata manually:
 - `author` defaults to `Prajas Wadekar`
 - `date` defaults to today's date in `YYYY-MM-DD` format
 - the table of contents is disabled unless you pass `--index`
+- Mermaid diagrams are rendered automatically when Mermaid CLI is available through `mmdc` or `npx`
+- Mermaid PNGs are rendered at 2x scale for sharper text in the final PDF
 
 If your Markdown file already contains YAML front matter, `mpdf` respects it. CLI arguments override YAML values when both are present.
 

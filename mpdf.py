@@ -66,6 +66,59 @@ class ObsidianContext:
     resolved_targets: dict[str, Path | None]
 
 
+class ProgressTracker:
+    """Minimal terminal progress bar for long-running conversions."""
+
+    def __init__(self, total: int, stream: object | None = None) -> None:
+        self.total = max(total, 1)
+        self.current = 0
+        self.message = "Starting..."
+        self.stream = stream if stream is not None else sys.stderr
+        self.interactive = hasattr(self.stream, "isatty") and self.stream.isatty()
+        self.closed = False
+
+    def add_total(self, amount: int) -> None:
+        if amount <= 0:
+            return
+        self.total += amount
+        if self.interactive:
+            self.render()
+
+    def status(self, message: str) -> None:
+        self.message = message
+        self.render()
+
+    def advance(self, message: str) -> None:
+        self.current = min(self.current + 1, self.total)
+        self.message = message
+        self.render()
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        if self.interactive:
+            self.stream.write("\n")
+            self.stream.flush()
+        self.closed = True
+
+    def render(self) -> None:
+        if self.closed:
+            return
+
+        percent = self.current / self.total if self.total else 1.0
+        if self.interactive:
+            width = 24
+            filled = int(width * percent)
+            bar = "#" * filled + "-" * (width - filled)
+            line = f"\r[{bar}] {percent:>6.1%} ({self.current}/{self.total}) {self.message}"
+            self.stream.write(line)
+            self.stream.flush()
+            return
+
+        self.stream.write(f"[{self.current}/{self.total}] {self.message}\n")
+        self.stream.flush()
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="mpdf",
@@ -353,10 +406,13 @@ def resolve_metadata(args: argparse.Namespace, yaml_meta: dict[str, str], input_
     )
 
 
-def prepare_input_for_pandoc(input_path: Path, stack: ExitStack) -> Path:
+def prepare_input_for_pandoc(input_path: Path, stack: ExitStack, progress: ProgressTracker | None = None) -> Path:
     source_text = input_path.read_text(encoding="utf-8")
+    if progress is not None:
+        progress.add_total(count_mermaid_blocks(source_text))
     obsidian_context = build_obsidian_context(input_path)
     rewritten_text = rewrite_obsidian_embeds(source_text, input_path, obsidian_context)
+    rewritten_text = rewrite_mermaid_blocks(rewritten_text, input_path, stack, progress)
     normalized_text = normalize_heading_spacing(rewritten_text)
 
     if normalized_text == source_text:
@@ -370,6 +426,219 @@ def prepare_input_for_pandoc(input_path: Path, stack: ExitStack) -> Path:
             normalized_text,
             directory=input_path.parent,
         )
+    )
+
+
+def count_mermaid_blocks(source_text: str) -> int:
+    lines = source_text.splitlines()
+    if not lines:
+        return 0
+
+    count = 0
+    line_index = 0
+    while line_index < len(lines):
+        line = lines[line_index]
+        fence_match = FENCED_CODE_BLOCK_PATTERN.match(line)
+        if not fence_match:
+            line_index += 1
+            continue
+
+        fence = fence_match.group(1)
+        info_string = line[fence_match.end() :].strip()
+        line_index += 1
+
+        if not is_mermaid_info_string(info_string):
+            while line_index < len(lines):
+                current_line = lines[line_index]
+                current_fence_match = FENCED_CODE_BLOCK_PATTERN.match(current_line)
+                line_index += 1
+                if (
+                    current_fence_match
+                    and current_fence_match.group(1)[0] == fence[0]
+                    and len(current_fence_match.group(1)) >= len(fence)
+                ):
+                    break
+            continue
+
+        count += 1
+        while line_index < len(lines):
+            current_line = lines[line_index]
+            current_fence_match = FENCED_CODE_BLOCK_PATTERN.match(current_line)
+            line_index += 1
+            if (
+                current_fence_match
+                and current_fence_match.group(1)[0] == fence[0]
+                and len(current_fence_match.group(1)) >= len(fence)
+            ):
+                break
+
+    return count
+
+
+def rewrite_mermaid_blocks(
+    source_text: str,
+    input_path: Path,
+    stack: ExitStack,
+    progress: ProgressTracker | None = None,
+) -> str:
+    lines = source_text.splitlines(keepends=True)
+    if not lines:
+        return source_text
+
+    rewritten_lines: list[str] = []
+    rendered_assets_dir: Path | None = None
+    diagram_index = 1
+    rendered_count = 0
+    line_index = 0
+
+    while line_index < len(lines):
+        line = lines[line_index]
+        fence_match = FENCED_CODE_BLOCK_PATTERN.match(line)
+        if not fence_match:
+            rewritten_lines.append(line)
+            line_index += 1
+            continue
+
+        fence = fence_match.group(1)
+        info_string = line[fence_match.end() :].strip()
+        if not is_mermaid_info_string(info_string):
+            rewritten_lines.append(line)
+            line_index += 1
+            continue
+
+        block_lines = [line]
+        diagram_lines: list[str] = []
+        line_index += 1
+        closed = False
+
+        while line_index < len(lines):
+            current_line = lines[line_index]
+            current_fence_match = FENCED_CODE_BLOCK_PATTERN.match(current_line)
+            if (
+                current_fence_match
+                and current_fence_match.group(1)[0] == fence[0]
+                and len(current_fence_match.group(1)) >= len(fence)
+            ):
+                block_lines.append(current_line)
+                line_index += 1
+                closed = True
+                break
+
+            block_lines.append(current_line)
+            diagram_lines.append(current_line)
+            line_index += 1
+
+        if not closed:
+            rewritten_lines.extend(block_lines)
+            break
+
+        diagram_source = "".join(diagram_lines).strip()
+        if not diagram_source:
+            rewritten_lines.extend(block_lines)
+            continue
+
+        if rendered_assets_dir is None:
+            rendered_assets_dir = make_temp_directory(stack, "mpdf-mermaid-", input_path.parent)
+
+        rendered_image = render_mermaid_diagram(
+            diagram_source,
+            input_path,
+            rendered_assets_dir,
+            diagram_index,
+        )
+        relative_path = os.path.relpath(rendered_image, start=input_path.parent).replace("\\", "/")
+        rewritten_lines.append(f"![Mermaid diagram {diagram_index}](<{relative_path}>)\n")
+        rendered_count += 1
+        if progress is not None:
+            progress.advance(f"Rendered Mermaid diagram {rendered_count}")
+        diagram_index += 1
+
+    return "".join(rewritten_lines)
+
+
+def is_mermaid_info_string(info_string: str) -> bool:
+    stripped = info_string.strip()
+    if not stripped:
+        return False
+
+    lowered = stripped.lower()
+    if lowered == "mermaid":
+        return True
+    if lowered.startswith("mermaid ") or lowered.startswith("mermaid{"):
+        return True
+    if stripped.startswith("{") and stripped.endswith("}"):
+        return re.search(r"(?:^|[\s.])mermaid(?:$|[\s}])", stripped, flags=re.IGNORECASE) is not None
+
+    return False
+
+
+def make_temp_directory(stack: ExitStack, prefix: str, directory: Path | None = None) -> Path:
+    temp_dir = tempfile.mkdtemp(prefix=prefix, dir=str(directory) if directory is not None else None)
+    temp_path = Path(temp_dir)
+    stack.callback(lambda path=temp_path: shutil.rmtree(path, ignore_errors=True))
+    return temp_path
+
+
+def render_mermaid_diagram(
+    diagram_source: str,
+    input_path: Path,
+    output_dir: Path,
+    diagram_index: int,
+) -> Path:
+    input_file = output_dir / f"diagram-{diagram_index}.mmd"
+    output_file = output_dir / f"diagram-{diagram_index}.png"
+    input_file.write_text(diagram_source, encoding="utf-8")
+
+    command = build_mermaid_command(input_file, output_file)
+    result = run_command(command, input_path.parent)
+    if result.returncode != 0 or not output_file.exists():
+        raise MpdfError(
+            "Mermaid diagram rendering failed.\n"
+            "Install Mermaid CLI with `npm install -g @mermaid-js/mermaid-cli`, "
+            "or make sure `npx` can run `@mermaid-js/mermaid-cli`.\n\n"
+            f"{format_command_error(command, result.stderr, result.stdout)}"
+        )
+
+    return output_file
+
+
+def build_mermaid_command(input_file: Path, output_file: Path) -> list[str]:
+    mmdc = shutil.which("mmdc") or shutil.which("mmdc.cmd")
+    if mmdc:
+        return [
+            mmdc,
+            "-q",
+            "-s",
+            "2",
+            "-b",
+            "transparent",
+            "-i",
+            str(input_file),
+            "-o",
+            str(output_file),
+        ]
+
+    npx = shutil.which("npx.cmd") or shutil.which("npx")
+    if npx:
+        return [
+            npx,
+            "--yes",
+            "@mermaid-js/mermaid-cli",
+            "-q",
+            "-s",
+            "2",
+            "-b",
+            "transparent",
+            "-i",
+            str(input_file),
+            "-o",
+            str(output_file),
+        ]
+
+    raise MpdfError(
+        "This Markdown file contains Mermaid diagrams, but Mermaid CLI is not available.\n"
+        "Install it with `npm install -g @mermaid-js/mermaid-cli`, or install Node.js so `npx` "
+        "can run `@mermaid-js/mermaid-cli` on demand."
     )
 
 
@@ -724,15 +993,25 @@ def format_command_error(command: list[str], stderr: str | bytes | None, stdout:
 
 
 def main() -> int:
+    progress = ProgressTracker(total=5)
     try:
         args = parse_args()
         require_input_file(args.input)
+        progress.advance("Validated input file")
+
+        progress.status("Checking dependencies...")
         check_dependencies()
+        progress.advance("Checked dependencies")
 
         with ExitStack() as stack:
-            prepared_input = prepare_input_for_pandoc(args.input, stack)
+            progress.status("Preparing Markdown...")
+            prepared_input = prepare_input_for_pandoc(args.input, stack, progress)
+            progress.advance("Prepared Markdown")
+
+            progress.status("Reading metadata...")
             input_config = detect_input_config(prepared_input)
             metadata = resolve_metadata(args, input_config.yaml_meta, args.input)
+            progress.advance("Resolved metadata")
             output_path = args.input.with_suffix(".pdf")
             command = build_pandoc_command(
                 args,
@@ -742,14 +1021,19 @@ def main() -> int:
                 output_path,
                 stack,
             )
+            progress.status("Generating PDF with Pandoc/XeLaTeX...")
             run_conversion(command, args.input.parent)
+            progress.advance("Generated PDF")
 
+        progress.close()
         print(f"Created PDF: {output_path}")
         return 0
     except MpdfError as exc:
+        progress.close()
         print(f"Error: {exc}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
+        progress.close()
         print("Error: conversion cancelled by user.", file=sys.stderr)
         return 130
 

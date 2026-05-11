@@ -35,6 +35,15 @@ def render_markdown(path: str) -> Path:
 print(render_markdown("report.md"))
 ```
 
+## Mermaid
+
+```mermaid
+flowchart TD
+    A[Markdown note] --> B[mpdf]
+    B --> C[Mermaid image]
+    C --> D[PDF output]
+```
+
 ## Table
 
 | Feature | Status |
